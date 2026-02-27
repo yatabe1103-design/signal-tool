@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>BOシグナル（安全版）</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans JP", sans-serif; margin: 12px; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 12px; margin: 10px 0; }
+    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    select, button { padding: 10px 12px; border-radius: 10px; border:1px solid #ccc; background:#fff; }
+    button.primary { border-color:#222; }
+    .big { font-size: 18px; font-weight: 700; }
+    .muted { color:#666; }
+    .badge { display:inline-block; padding:6px 10px; border:1px solid #ddd; border-radius: 999px; }
+    .grid { display:grid; grid-template-columns: 1fr; gap:10px; }
+    .ok { color:#0a7; font-weight:700; }
+    .ng { color:#c33; font-weight:700; }
+    .warn { color:#b60; font-weight:700; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+  </style>
+</head>
+<body>
+  <h2>BOシグナル（安全版：自動発注なし）</h2>
+  <div class="muted">公開価格データから、1分/3分/5分で「HIGH/LOW候補」を表示します。最終判断とエントリーは必ず手動で。</div>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <div class="muted">通貨ペア</div>
+        <select id="pair">
+          <option value="BTCUSD">BTC/USD</option>
+          <option value="BTCJPY">BTC/JPY</option>
+          <option value="ETHUSD">ETH/USD</option>
+          <option value="ETHJPY">ETH/JPY</option>
+        </select>
+      </div>
+      <div>
+        <div class="muted">更新</div>
+        <button id="refresh" class="primary">今すぐ更新</button>
+      </div>
+      <div class="badge">次の開始まで：<span id="countdown" class="mono">--</span></div>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="card" id="tf1">
+      <div class="row">
+        <div class="big">1分</div>
+        <div class="badge">候補：<span class="big" id="sig1">--</span></div>
+        <div class="badge">強さ：<span id="score1" class="mono">--</span></div>
+      </div>
+      <div class="muted" id="why1">--</div>
+      <div class="row" style="margin-top:10px;">
+        <button onclick="recordResult(1,1)">このシグナルで勝ち</button>
+        <button onclick="recordResult(1,0)">このシグナルで負け</button>
+        <span class="muted">学習回数：<span id="learn1" class="mono">0</span></span>
+      </div>
+    </div>
+
+    <div class="card" id="tf3">
+      <div class="row">
+        <div class="big">3分</div>
+        <div class="badge">候補：<span class="big" id="sig3">--</span></div>
+        <div class="badge">強さ：<span id="score3" class="mono">--</span></div>
+      </div>
+      <div class="muted" id="why3">--</div>
+      <div class="row" style="margin-top:10px;">
+        <button onclick="recordResult(3,1)">このシグナルで勝ち</button>
+        <button onclick="recordResult(3,0)">このシグナルで負け</button>
+        <span class="muted">学習回数：<span id="learn3" class="mono">0</span></span>
+      </div>
+    </div>
+
+    <div class="card" id="tf5">
+      <div class="row">
+        <div class="big">5分</div>
+        <div class="badge">候補：<span class="big" id="sig5">--</span></div>
+        <div class="badge">強さ：<span id="score5" class="mono">--</span></div>
+      </div>
+      <div class="muted" id="why5">--</div>
+      <div class="row" style="margin-top:10px;">
+        <button onclick="recordResult(5,1)">このシグナルで勝ち</button>
+        <button onclick="recordResult(5,0)">このシグナルで負け</button>
+        <span class="muted">学習回数：<span id="learn5" class="mono">0</span></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <button onclick="resetLearning()">学習データをリセット</button>
+      <span class="muted">※端末内保存です（サーバー送信なし）</span>
+    </div>
+    <div class="muted" style="margin-top:6px;">
+      使っている指標：ボリンジャーバンド(20,2σ) / RSI(14) / EMA(20,50) / ATR(14)（簡易）
+    </div>
+  </div>
+
+<script>
+/**
+ * 安全版：自動発注なし。公開APIからローソク足を取得して、シグナル候補を表示するだけ。
+ * 学習：端末内(localStorage)に、勝ち/負けを押した時の特徴量を保存し、簡易ロジスティック回帰で係数更新。
+ */
+
+// ====== 公開データ取得（CORSが通ることが多い） ======
+// Kline: Binance public API (USDT建て)
+// USDJPY: open.er-api.com（無料のレート例）
+async function fetchUSDJPY() {
+  const res = await fetch("https://open.er-api.com/v6/latest/USD");
+  const j = await res.json();
+  return j?.rates?.JPY ?? 150;
+}
+
+function mapPairToBinanceSymbol(pair){
+  // JPYは合成：USD建て * USDJPY
+  if (pair === "BTCUSD" || pair === "BTCJPY") return "BTCUSDT";
+  if (pair === "ETHUSD" || pair === "ETHJPY") return "ETHUSDT";
+  return "BTCUSDT";
+}
+
+// interval: "1m" "3m" "5m"
+async function fetchKlines(symbol, interval, limit=200){
+  const url = `https://api.binance.com/api/v3/klines?symbol=${encodeURIComponent(symbol)}&interval=${interval}&limit=${limit}`;
+  const res = await fetch(url);
+  if(!res.ok) throw new Error("価格データ取得に失敗しました（API）");
+  const arr = await res.json();
+  // [ openTime, open, high, low, close, volume, closeTime, ... ]
+  return arr.map(r => ({
+    t: r[0],
+    o: +r[1],
+    h: +r[2],
+    l: +r[3],
+    c: +r[4],
+    v: +r[5],
+  }));
+}
+
+// ====== 指標 ======
+function sma(values, period){
+  if(values.length < period) return null;
+  const slice = values.slice(values.length - period);
+  return slice.reduce((a,b)=>a+b,0)/period;
+}
+function std(values, period){
+  if(values.length < period) return null;
+  const m = sma(values, period);
+  const slice = values.slice(values.length - period);
+  const v = slice.reduce((a,x)=>a+(x-m)*(x-m),0)/period;
+  return Math.sqrt(v);
+}
+function ema(values, period){
+  if(values.length < period) return null;
+  const k = 2/(period+1);
+  let e = values[0];
+  for(let i=1;i<values.length;i++){
+    e = values[i]*k + e*(1-k);
+  }
+  return e;
+}
+function rsi(values, period=14){
+  if(values.length < period+1) return null;
+  let gains=0, losses=0;
+  for(let i=values.length - period; i<values.length; i++){
+    const diff = values[i] - values[i-1];
+    if(diff >= 0) gains += diff;
+    else losses += -diff;
+  }
+  const rs = losses === 0 ? 999 : gains / losses;
+  return 100 - (100/(1+rs));
+}
+function atr(candles, period=14){
+  if(candles.length < period+1) return null;
+  let sum=0;
+  for(let i=candles.length - period; i<candles.length; i++){
+    const cur = candles[i];
+    const prev = candles[i-1];
+    const tr = Math.max(
+      cur.h - cur.l,
+      Math.abs(cur.h - prev.c),
+      Math.abs(cur.l - prev.c)
+    );
+    sum += tr;
+  }
+  return sum/period;
+}
+
+// ====== 学習（端末内ロジスティック回帰：SGD） ======
+function keyModel(tf){ return `bo_model_v1_tf${tf}`; }
+function loadModel(tf){
+  const raw = localStorage.getItem(keyModel(tf));
+  if(!raw) return { w:[0,0,0,0,0], b:0, n:0 }; // 5特徴
+  try { return JSON.parse(raw); } catch { return { w:[0,0,0,0,0], b:0, n:0 }; }
+}
+function saveModel(tf, m){
+  localStorage.setItem(keyModel(tf), JSON.stringify(m));
+}
+function sigmoid(x){ return 1/(1+Math.exp(-x)); }
+
+// 特徴量：
+// x0=%B(ボリバン位置), x1=RSI正規化, x2=EMA差分, x3=ATR比率, x4=直近足の勢い
+function extractFeatures(candles){
+  const closes = candles.map(x=>x.c);
+  const bbP=20;
+  const mid = sma(closes, bbP);
+  const sd = std(closes, bbP);
+  const upper = mid + 2*sd;
+  const lower = mid - 2*sd;
+  const last = closes[closes.length-1];
+
+  const percentB = (last - lower) / (upper - lower); // 0〜1目安（外に出ると<0 or >1）
+  const r = rsi(closes, 14);
+  const rNorm = (r - 50)/50; // -1〜+1目安
+
+  const e20 = ema(closes.slice(-60), 20);
+  const e50 = ema(closes.slice(-120), 50);
+  const emaDiff = (e20 - e50) / last; // 小さい値
+
+  const a = atr(candles, 14);
+  const atrRatio = a / last;
+
+  const prev = closes[closes.length-2];
+  const momentum = (last - prev) / prev;
+
+  // クリップして暴れを抑える
+  const clip = (x, lo, hi)=>Math.max(lo, Math.min(hi, x));
+  return [
+    clip(percentB, -1, 2),
+    clip(rNorm, -1.5, 1.5),
+    clip(emaDiff, -0.01, 0.01),
+    clip(atrRatio, 0, 0.02),
+    clip(momentum, -0.01, 0.01),
+  ];
+}
+
+function predictProb(tf, features){
+  const m = loadModel(tf);
+  let z = m.b;
+  for(let i=0;i<m.w.length;i++) z += m.w[i]*features[i];
+  const p = sigmoid(z);
+  return { p, model:m };
+}
+
+function train(tf, features, y){
+  // y: 1=勝ち, 0=負け
+  const m = loadModel(tf);
+  const lr = 0.15; // 学習率（大きすぎるとブレる）
+  let z = m.b;
+  for(let i=0;i<m.w.length;i++) z += m.w[i]*features[i];
+  const p = sigmoid(z);
+  const grad = (p - y); // ロジ損失の勾配
+
+  for(let i=0;i<m.w.length;i++){
+    m.w[i] -= lr * grad * features[i];
+  }
+  m.b -= lr * grad;
+  m.n = (m.n ?? 0) + 1;
+  saveModel(tf, m);
+  return m.n;
+}
+
+// ====== ルールベース + 学習スコアを合成 ======
+function ruleSignal(candles){
+  const closes = candles.map(x=>x.c);
+  const mid = sma(closes, 20);
+  const sd = std(closes, 20);
+  const upper = mid + 2*sd;
+  const lower = mid - 2*sd;
+  const last = closes[closes.length-1];
+  const r = rsi(closes, 14);
+  const e20 = ema(closes.slice(-60), 20);
+  const e50 = ema(closes.slice(-120), 50);
+  const a = atr(candles, 14);
+
+  // ざっくりの判断（MVP）
+  let dir = "見送り";
+  let strength = 0;
+  const reasons = [];
+
+  // 反発（逆張り）候補
+  if(last < lower && r !== null && r < 32){
+    dir = "HIGH";
+    strength += 0.65;
+    reasons.push("下バンド割れ＋RSI売られすぎ → 反発HIGH候補");
+  }
+  if(last > upper && r !== null && r > 68){
+    dir = "LOW";
+    strength += 0.65;
+    reasons.push("上バンド超え＋RSI買われすぎ → 反落LOW候補");
+  }
+
+  // トレンド補強
+  if(e20 && e50){
+    if(e20 > e50 && last > mid){
+      if(dir === "HIGH") strength += 0.15;
+      reasons.push("EMA上向き＆ミドル上 → 上昇寄り");
+    } else if(e20 < e50 && last < mid){
+      if(dir === "LOW") strength += 0.15;
+      reasons.push("EMA下向き＆ミドル下 → 下降寄り");
+    }
+  }
+
+  // ボラが高すぎると騙し増えるので弱める
+  if(a && (a/last) > 0.012){
+    strength -= 0.15;
+    reasons.push("ボラ高め（だまし注意）→ 強さを少し下げ");
+  }
+
+  strength = Math.max(0, Math.min(1, strength));
+  return { dir, strength, reasons };
+}
+
+function formatScore(x){
+  return (Math.round(x*1000)/10).toFixed(1) + "%";
+}
+
+// ====== UI更新 ======
+const el = (id)=>document.getElementById(id);
+let lastFeaturesByTF = { 1:null, 3:null, 5:null };
+
+async function updateAll(){
+  const pair = el("pair").value;
+  const symbol = mapPairToBinanceSymbol(pair);
+  let usdJpy = 150;
+  const needJPY = pair.endsWith("JPY");
+  try{
+    if(needJPY) usdJpy = await fetchUSDJPY();
+  }catch(e){
+    // レートが取れない場合は近似のまま
+  }
+
+  await Promise.all([1,3,5].map(tf => updateTF(tf, symbol, pair, usdJpy)));
+}
+
+async function updateTF(tf, symbol, pair, usdJpy){
+  const interval = tf===1?"1m":tf===3?"3m":"5m";
+  try{
+    const candles = await fetchKlines(symbol, interval, 220);
+    // JPYは合成変換
+    if(pair.endsWith("JPY")){
+      for(const c of candles){
+        c.o *= usdJpy; c.h *= usdJpy; c.l *= usdJpy; c.c *= usdJpy;
+      }
+    }
+
+    const feat = extractFeatures(candles);
+    lastFeaturesByTF[tf] = feat;
+
+    const rule = ruleSignal(candles);
+    const { p, model } = predictProb(tf, feat);
+
+    // 合成スコア：ルール強さ + 学習確率の寄与（控えめ）
+    let combined = rule.strength*0.75 + p*0.25;
+
+    // 見送りの場合は学習寄与も弱める
+    if(rule.dir === "見送り") combined = combined*0.5;
+
+    const sigId = tf===1?"sig1":tf===3?"sig3":"sig5";
+    const scoreId = tf===1?"score1":tf===3?"score3":"score5";
+    const whyId = tf===1?"why1":tf===3?"why3":"why5";
+    const learnId = tf===1?"learn1":tf===3?"learn3":"learn5";
+
+    el(sigId).textContent = rule.dir;
+    el(scoreId).textContent = formatScore(combined);
+    el(learnId).textContent = String(model.n ?? 0);
+
+    const extra = `（学習確率: ${(p*100).toFixed(1)}% / ルール: ${(rule.strength*100).toFixed(1)}%）`;
+    el(whyId).innerHTML = (rule.reasons.length ? "理由： " + rule.reasons.join(" / ") : "条件が揃っていないため見送り") + `<br><span class="mono muted">${extra}</span>`;
+
+  }catch(e){
+    const whyId = tf===1?"why1":tf===3?"why3":"why5";
+    el(whyId).innerHTML = `<span class="ng">取得エラー：</span>${e.message}<br><span class="muted">※しばらくして再更新してください（API制限や通信不安定の可能性）</span>`;
+  }
+}
+
+function recordResult(tf, win){
+  const feat = lastFeaturesByTF[tf];
+  if(!feat){
+    alert("先に「今すぐ更新」を押して、シグナルを表示してから押してください。");
+    return;
+  }
+  const n = train(tf, feat, win);
+  el(tf===1?"learn1":tf===3?"learn3":"learn5").textContent = String(n);
+  alert(`記録しました（TF=${tf}分 / ${win? "勝ち":"負け"}）。次回からスコアに反映されます。`);
+}
+
+function resetLearning(){
+  for(const tf of [1,3,5]){
+    localStorage.removeItem(keyModel(tf));
+  }
+  alert("学習データをリセットしました。");
+  updateAll();
+}
+
+// ====== カウントダウン：次の1分開始まで ======
+function startCountdown(){
+  setInterval(()=>{
+    const now = new Date();
+    const sec = now.getSeconds();
+    const remain = 60 - sec;
+    el("countdown").textContent = remain + "秒";
+  }, 250);
+}
+
+el("refresh").addEventListener("click", updateAll);
+el("pair").addEventListener("change", updateAll);
+
+startCountdown();
+updateAll();
+</script>
+</body>
+</html>
