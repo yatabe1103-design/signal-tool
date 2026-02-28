@@ -271,44 +271,50 @@ function ruleSignal(candles){
   const lower = mid - 2*sd;
   const last = closes[closes.length-1];
   const r = rsi(closes, 14);
-  const e20 = ema(closes.slice(-60), 20);
-  const e50 = ema(closes.slice(-120), 50);
+  const e20 = ema(closes.slice(-80), 20);
+  const e50 = ema(closes.slice(-160), 50);
   const a = atr(candles, 14);
 
-  // ざっくりの判断（MVP）
   let dir = "見送り";
   let strength = 0;
   const reasons = [];
 
-  // 反発（逆張り）候補
-  if(last < lower && r !== null && r < 32){
+  // ===== バランス型：反発条件を少し緩める =====
+  // 反発：BB外＋RSIゆるめ（30/70より少し広げる）
+  if(last < lower && r !== null && r < 35){
     dir = "HIGH";
-    strength += 0.65;
-    reasons.push("下バンド割れ＋RSI売られすぎ → 反発HIGH候補");
+    strength += 0.62;
+    reasons.push("下バンド割れ＋RSI<35 → 反発HIGH候補");
   }
-  if(last > upper && r !== null && r > 68){
+  if(last > upper && r !== null && r > 65){
     dir = "LOW";
-    strength += 0.65;
-    reasons.push("上バンド超え＋RSI買われすぎ → 反落LOW候補");
+    strength += 0.62;
+    reasons.push("上バンド超え＋RSI>65 → 反落LOW候補");
   }
 
-  // トレンド補強
-  if(e20 && e50){
-    if(e20 > e50 && last > mid){
-      if(dir === "HIGH") strength += 0.15;
-      reasons.push("EMA上向き＆ミドル上 → 上昇寄り");
-    } else if(e20 < e50 && last < mid){
-      if(dir === "LOW") strength += 0.15;
-      reasons.push("EMA下向き＆ミドル下 → 下降寄り");
+  // ===== トレンド：加点を少し強くしてチャンスを拾う =====
+  if(e20 && e50 && mid){
+    const trendUp = (e20 > e50);
+    const trendDn = (e20 < e50);
+
+    // ミドル上/下はトレンド方向の有利を示しやすい
+    if(trendUp && last > mid){
+      if(dir === "見送り") { dir = "HIGH"; strength += 0.30; reasons.push("EMA上向き＆ミドル上 → 押し目HIGH候補"); }
+      else if(dir === "HIGH") { strength += 0.18; reasons.push("EMA上向き補強"); }
+    }
+    if(trendDn && last < mid){
+      if(dir === "見送り") { dir = "LOW"; strength += 0.30; reasons.push("EMA下向き＆ミドル下 → 戻り目LOW候補"); }
+      else if(dir === "LOW") { strength += 0.18; reasons.push("EMA下向き補強"); }
     }
   }
 
-  // ボラが高すぎると騙し増えるので弱める
-  if(a && (a/last) > 0.012){
-    strength -= 0.15;
-    reasons.push("ボラ高め（だまし注意）→ 強さを少し下げ");
+  // ===== ボラ調整：高すぎるとダマシ増えるので少し減点 =====
+  if(a && (a/last) > 0.014){
+    strength -= 0.12;
+    reasons.push("ボラ高め（だまし注意）→ 少し減点");
   }
 
+  // 下限上限
   strength = Math.max(0, Math.min(1, strength));
   return { dir, strength, reasons };
 }
@@ -369,7 +375,9 @@ async function updateTF(tf, symbol, pair, usdJpy){
 
     const extra = `（学習確率: ${(p*100).toFixed(1)}% / ルール: ${(rule.strength*100).toFixed(1)}%）`;
     el(whyId).innerHTML = (rule.reasons.length ? "理由： " + rule.reasons.join(" / ") : "条件が揃っていないため見送り") + `<br><span class="mono muted">${extra}</span>`;
-
+if(rule.dir !== "見送り" && combined >= 0.70){
+  playAlert(tf, rule.dir, combined);
+}
   }catch(e){
     const whyId = tf===1?"why1":tf===3?"why3":"why5";
     el(whyId).innerHTML = `<span class="ng">取得エラー：</span>${e.message}<br><span class="muted">※しばらくして再更新してください（API制限や通信不安定の可能性）</span>`;
@@ -396,6 +404,40 @@ function resetLearning(){
 }
 
 // ====== カウントダウン：次の1分開始まで ======
+  let lastAlertAt = { 1:0, 3:0, 5:0 };
+
+function canNotify(){
+  const cb = document.getElementById("notifyOn");
+  return cb ? cb.checked : true;
+}
+
+function playAlert(tf, dir, score){
+  if(!canNotify()) return;
+
+  const now = Date.now();
+  if(now - (lastAlertAt[tf]||0) < 30000) return;
+  lastAlertAt[tf] = now;
+
+  if(navigator.vibrate) navigator.vibrate([120,80,120]);
+
+  try{
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator();
+    const g = ctx.createGain();
+    o.type = "sine";
+    o.frequency.value = 880;
+    g.gain.value = 0.06;
+    o.connect(g);
+    g.connect(ctx.destination);
+    o.start();
+    setTimeout(()=>{
+      o.stop();
+      ctx.close();
+    }, 220);
+  }catch(e){}
+
+  alert(`【強シグナル】${tf}分：${dir} / 強さ ${Math.round(score*100)}%`);
+}
 function startCountdown(){
   setInterval(()=>{
     const now = new Date();
