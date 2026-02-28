@@ -42,7 +42,7 @@
   <input type="checkbox" id="notifyOn" checked style="transform:scale(1.2); margin-right:6px;">通知ON
 </label>
       </div>
-      <div class="badge">次の開始まで：<span id="countdown" class="mono">--</span></div>
+      <div class="badge"><span id="entryText" class="mono">--</span></div>
     </div>
   </div>
 
@@ -326,7 +326,11 @@ function formatScore(x){
 // ====== UI更新 ======
 const el = (id)=>document.getElementById(id);
 let lastFeaturesByTF = { 1:null, 3:null, 5:null };
-
+let lastSignalByTF = {
+  1: { dir: "見送り", score: 0 },
+  3: { dir: "見送り", score: 0 },
+  5: { dir: "見送り", score: 0 },
+};
 async function updateAll(){
   const pair = el("pair").value;
   const symbol = mapPairToBinanceSymbol(pair);
@@ -372,7 +376,7 @@ async function updateTF(tf, symbol, pair, usdJpy){
     el(sigId).textContent = rule.dir;
     el(scoreId).textContent = formatScore(combined);
     el(learnId).textContent = String(model.n ?? 0);
-
+lastSignalByTF[tf] = { dir: rule.dir, score: combined };
     const extra = `（学習確率: ${(p*100).toFixed(1)}% / ルール: ${(rule.strength*100).toFixed(1)}%）`;
     el(whyId).innerHTML = (rule.reasons.length ? "理由： " + rule.reasons.join(" / ") : "条件が揃っていないため見送り") + `<br><span class="mono muted">${extra}</span>`;
 if(rule.dir !== "見送り" && combined >= 0.70){
@@ -438,12 +442,43 @@ function playAlert(tf, dir, score){
 
   alert(`【強シグナル】${tf}分：${dir} / 強さ ${Math.round(score*100)}%`);
 }
+function remainToNextBoundary(tf){
+  const now = new Date();
+  const sec = now.getSeconds();
+  const min = now.getMinutes();
+  const nextMin = min + (tf - (min % tf));
+  const minsToGo = nextMin - min;
+  return minsToGo * 60 - sec;
+}
+
+function pickBestTF(){
+  let bestTF = 1;
+  let bestScore = -1;
+  for(const tf of [1,3,5]){
+    const s = lastSignalByTF[tf];
+    if(s && s.dir !== "見送り" && s.score > bestScore){
+      bestScore = s.score;
+      bestTF = tf;
+    }
+  }
+  return bestScore < 0 ? 1 : bestTF;
+}
+
 function startCountdown(){
   setInterval(()=>{
-    const now = new Date();
-    const sec = now.getSeconds();
-    const remain = 60 - sec;
-    el("countdown").textContent = remain + "秒";
+    const tf = pickBestTF();
+    const s = lastSignalByTF[tf];
+    const remain = remainToNextBoundary(tf);
+    const textEl = el("entryText");
+    if(!textEl) return;
+
+    if(s && s.dir !== "見送り"){
+      textEl.textContent =
+        `${remain}秒後に ${s.dir} エントリー推奨（${tf}分）`;
+    } else {
+      textEl.textContent =
+        `次の判定まで：${remain}秒（${tf}分）`;
+    }
   }, 250);
 }
 
